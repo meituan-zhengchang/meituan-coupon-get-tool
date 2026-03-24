@@ -185,6 +185,12 @@ ISSUE_RESULT=$($PYTHON "$ISSUE_SCRIPT" --token "$USER_TOKEN" --phone-masked "$PH
 
 #### 失败响应（success=false）
 
+> ⚠️ **【强制】发券失败时必须明确告知用户本次领取失败，禁止跳过失败提示直接执行 Step 3（查询）。**
+>
+> 部分 Agent 在发券失败后会继续调用查询接口（Step 3），查询结果可能包含历史领券记录，**切勿将历史领券记录误作本次领取成功展示给用户**，这会严重误导用户。
+>
+> 正确处理顺序：**先向用户展示发券失败提示 → 流程结束**，不再自动执行查询。
+
 | error 值 | 展示给用户的提示 |
 |---------|----------------|
 | `ALREADY_RECEIVED` | 你今天已经通过小美领取过美团权益了，明天再来哦～ |
@@ -309,3 +315,4 @@ QUERY_RESULT=$($PYTHON "$QUERY_SCRIPT" --token "$USER_TOKEN" --dates "20260320,2
 - `subChannelCode` 存储在 `scripts/config.json` 中，不在本文件中展示
 - 每天每个账号仅可领取一次（服务端防重，`equityPkgRedeemCode` 为每天固定值）
 - 发放接口使用线上外网域名（`peppermall.meituan.com`），无需内网环境即可访问
+- **发券失败（success=false）后，必须立即向用户展示失败原因，流程到此结束，禁止继续执行 Step 3 查询**；Step 3 仅在用户主动询问历史记录时才可调用
