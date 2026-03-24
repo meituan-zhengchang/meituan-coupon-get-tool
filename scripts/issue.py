@@ -224,8 +224,8 @@ def main():
         4011: ("QUOTA_EXHAUSTED", "抱歉，本次活动权益已发放完毕，下次早点来哦～"),
     }
 
-    if code == 0 and data:
-        # 发券成功，保存兑换码到历史文件（首次领取时才写，复用历史 code 不重复写）
+    if code == 0:
+        # 发券成功（code=0），保存兑换码到历史文件（首次领取时才写，复用历史 code 不重复写）
         if not existing_codes:
             save_redeem_code(sub_channel_code, args.token, today, redeem_code)
 

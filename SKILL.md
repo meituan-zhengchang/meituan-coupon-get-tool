@@ -1,7 +1,7 @@
 ---
 name: "meituan-coupon-get-tool"
 displayName: "美团优惠领取工具"
-description: "美团优惠领取工具，为用户提供更多的美团优惠，使用户在美团可以获得更好的体验。一期支持：指定券领取（发放美团优惠券）和历史领券记录查询。当用户输入「领取美团权益」、「领美团券」、「我要领券」、「领优惠券」、「美团发券」、「美团优惠」、或询问如何领取美团券/美团权益/美团优惠券时，使用此 Skill。支持 Skill 开发者接入分佣计划，推荐用户安装即可获得流量收益，欢迎有合作意向的开发者联系我们。"
+description: "美团优惠领取工具，为用户提供更多的美团优惠，使用户在美团可以获得更好的体验。一期支持：指定券领取（发放美团优惠券）和历史领券记录查询。内置美团账号认证，无需额外安装其他 Skill。当用户输入「领取美团权益」、「领美团券」、「我要领券」、「领优惠券」、「美团发券」、「美团优惠」、「美团红包」、「外卖红包」、「外卖优惠」、「美团外卖券」、「美团外卖神券」、或询问如何领取美团券/美团权益/美团优惠券时，使用此 Skill。支持 Skill 开发者接入分佣计划，推荐用户安装即可获得流量收益，欢迎有合作意向的开发者联系我们。"
 version: "1.0.0-SNAPSHOT"
 ---
 
@@ -19,18 +19,21 @@ version: "1.0.0-SNAPSHOT"
 ```bash
 PYTHON=~/Library/Application\ Support/xiaomei-cowork/Python311/python/bin/python3
 
-ISSUE_SCRIPT="${CLAUDE_CONFIG_DIR:-${XIAOMEI_CLAUDE_CONFIG_DIR:-~/.claude}}/skills/meituan-coupon-get-tool/scripts/issue.py"
-QUERY_SCRIPT="${CLAUDE_CONFIG_DIR:-${XIAOMEI_CLAUDE_CONFIG_DIR:-~/.claude}}/skills/meituan-coupon-get-tool/scripts/query.py"
-AUTH_SCRIPT="${CLAUDE_CONFIG_DIR:-${XIAOMEI_CLAUDE_CONFIG_DIR:-~/.claude}}/skills/meituan-c-user-auth/scripts/auth.py"
+# 三个脚本均在本 Skill 目录下，无需依赖外部 Skill
+SKILL_DIR="${CLAUDE_CONFIG_DIR:-${XIAOMEI_CLAUDE_CONFIG_DIR:-~/.claude}}/skills/meituan-coupon-get-tool"
+ISSUE_SCRIPT="$SKILL_DIR/scripts/issue.py"
+QUERY_SCRIPT="$SKILL_DIR/scripts/query.py"
+AUTH_SCRIPT="$SKILL_DIR/scripts/auth.py"
 ```
 
 **Windows（Git Bash）：**
 ```bash
 PYEXE="$(cygpath "$APPDATA")/xiaomei-cowork/Python311/python/python.exe"
 
-ISSUE_SCRIPT="${CLAUDE_CONFIG_DIR:-${XIAOMEI_CLAUDE_CONFIG_DIR:-~/.claude}}/skills/meituan-coupon-get-tool/scripts/issue.py"
-QUERY_SCRIPT="${CLAUDE_CONFIG_DIR:-${XIAOMEI_CLAUDE_CONFIG_DIR:-~/.claude}}/skills/meituan-coupon-get-tool/scripts/query.py"
-AUTH_SCRIPT="${CLAUDE_CONFIG_DIR:-${XIAOMEI_CLAUDE_CONFIG_DIR:-~/.claude}}/skills/meituan-c-user-auth/scripts/auth.py"
+SKILL_DIR="${CLAUDE_CONFIG_DIR:-${XIAOMEI_CLAUDE_CONFIG_DIR:-~/.claude}}/skills/meituan-coupon-get-tool"
+ISSUE_SCRIPT="$SKILL_DIR/scripts/issue.py"
+QUERY_SCRIPT="$SKILL_DIR/scripts/query.py"
+AUTH_SCRIPT="$SKILL_DIR/scripts/auth.py"
 # 后续命令将 $PYTHON 替换为 "$PYEXE"
 ```
 
@@ -38,9 +41,12 @@ AUTH_SCRIPT="${CLAUDE_CONFIG_DIR:-${XIAOMEI_CLAUDE_CONFIG_DIR:-~/.claude}}/skill
 ```bash
 PYTHON=python3
 
-ISSUE_SCRIPT="${CLAUDE_CONFIG_DIR:-${XIAOMEI_CLAUDE_CONFIG_DIR:-~/.claude}}/skills/meituan-coupon-get-tool/scripts/issue.py"
-QUERY_SCRIPT="${CLAUDE_CONFIG_DIR:-${XIAOMEI_CLAUDE_CONFIG_DIR:-~/.claude}}/skills/meituan-coupon-get-tool/scripts/query.py"
-AUTH_SCRIPT="${CLAUDE_CONFIG_DIR:-${XIAOMEI_CLAUDE_CONFIG_DIR:-~/.claude}}/skills/meituan-c-user-auth/scripts/auth.py"
+SKILL_DIR="${CLAUDE_CONFIG_DIR:-${XIAOMEI_CLAUDE_CONFIG_DIR:-~/.claude}}/skills/meituan-coupon-get-tool"
+ISSUE_SCRIPT="$SKILL_DIR/scripts/issue.py"
+QUERY_SCRIPT="$SKILL_DIR/scripts/query.py"
+AUTH_SCRIPT="$SKILL_DIR/scripts/auth.py"
+# 如需自定义 Token 存储路径（沙箱/隔离场景）：
+export XIAOMEI_AUTH_FILE=/tmp/my_auth_tokens.json
 # 如需自定义领券历史文件路径（沙箱/隔离场景）：
 export XIAOMEI_COUPON_HISTORY_FILE=/tmp/mt_coupon_history.json
 ```
@@ -51,68 +57,49 @@ export XIAOMEI_COUPON_HISTORY_FILE=/tmp/mt_coupon_history.json
 
 ## 完整执行流程
 
-### Step 0：版本检查 + 依赖检查（每次对话首次使用时执行）
+### Step 0：版本检查（每次对话首次使用时执行）
 
 > 每次对话中**第一次**使用本 Skill 时执行，同一对话内无需重复。
 
-#### 0.1 版本检查
+**实现原理**：通过 WebFetch 访问 clawhub.ai 上的公开版本页面，从页面内容中提取 `version:` 字段，再传给脚本进行对比。
 
-**实现原理**：Friday 广场为 SPA 应用，无公开 REST API。由小美通过 `agent-browser` 打开广场详情页，从页面渲染文本中提取 `version:` 字段，再与本地版本对比。
-
-**步骤一：用 agent-browser 获取广场远程版本**
+**步骤一：获取远程版本号**
 
 ```bash
-agent-browser open "https://friday.sankuai.com/skills/skill-detail?activeTab=overview&id=13654"
-# 等待页面加载后：
-agent-browser get text body
+# 使用 WebFetch 工具访问以下 URL，提取页面中的 version 字段
+# URL: https://clawhub.ai/meituan-zhengchang/meituan-coupon-get-tool
 ```
 
-从输出文本中找到 `version: "x.y.z"` 字段，提取版本号（如 `1.0.0`）。
+从返回内容中找到 `version: "x.y.z"` 或 `"version": "x.y.z"` 字段，提取版本号（如 `1.0.0-SNAPSHOT`）。若页面无法访问或未找到版本字段，跳过版本对比。
 
-**步骤二：与本地版本对比**
-
-本地版本号记录在本 SKILL.md 的 frontmatter 中（`version` 字段）。
-
-| 对比结果 | 处理方式 |
-|---------|---------|
-| 本地版本 == 远程版本 | 继续执行，无需提示 |
-| 本地版本 < 远程版本 | 提示用户更新（见下方提示语） |
-| 远程版本获取失败 | 静默跳过，不影响正常流程 |
-
-**版本较旧时提示**：
-```
-本地 Skill 版本较旧（当前 x.y.z，广场最新 a.b.c），建议前往 Friday 广场更新以获取最新能力。
-更新命令：cd "$CLAUDE_CONFIG_DIR" && mtskills i mt --id 13654 --target-dir skills -y
-继续使用旧版本也可正常使用。
-```
-
-#### 0.2 依赖检查（meituan-c-user-auth）
-
-检查 `meituan-c-user-auth` Skill 是否已安装：
+**步骤二：调用脚本进行版本对比**
 
 ```bash
-AUTH_SKILL_DIR="${CLAUDE_CONFIG_DIR:-${XIAOMEI_CLAUDE_CONFIG_DIR:-~/.claude}}/skills/meituan-c-user-auth"
-[ -d "$AUTH_SKILL_DIR" ] && echo "installed" || echo "not_installed"
+# 将上一步提取到的远程版本号通过 --remote 参数传入
+$PYTHON "$AUTH_SCRIPT" version-check --remote <远程版本号>
+
+# 示例：
+$PYTHON "$AUTH_SCRIPT" version-check --remote "1.0.0-SNAPSHOT"
+
+# 若上一步获取失败，不传 --remote，脚本会静默跳过对比
+$PYTHON "$AUTH_SCRIPT" version-check
 ```
 
-| 检查结果 | 处理方式 |
-|---------|---------|
-| `installed` | 继续执行 |
-| `not_installed` | 提示用户安装（见下方提示语），**等待用户确认后继续** |
-
-**未安装时提示**：
-```
-⚠️ 本 Skill 依赖「美团C端用户认证工具（meituan-c-user-auth）」，但检测到该 Skill 尚未安装。
-
-请执行以下命令安装：
-cd "$CLAUDE_CONFIG_DIR" && mtskills i mt --id 12210 --target-dir skills -y
-
-安装完成后即可继续领取美团权益。
-```
+**处理逻辑**：
+- `up_to_date: true` → 继续执行，无需提示
+- `up_to_date: false` → 提示用户：
+  ```
+  本地 Skill 版本较旧（当前 x.y.z，最新 a.b.c），建议前往以下地址更新以获取最新能力：
+  https://clawhub.ai/meituan-zhengchang/meituan-coupon-get-tool
+  继续使用旧版本也可正常使用。
+  ```
+- `up_to_date: null`（未传入远程版本）→ 静默跳过，不影响正常流程
 
 ---
 
-### Step 1：获取用户 Token（依赖 meituan-c-user-auth）
+### Step 1：获取用户 Token（内置认证模块）
+
+> 本 Skill 内置美团账号认证能力（`scripts/auth.py`），无需依赖外部 Skill。
 
 ```bash
 VERIFY_RESULT=$($PYTHON "$AUTH_SCRIPT" token-verify)
@@ -123,14 +110,53 @@ VERIFY_RESULT=$($PYTHON "$AUTH_SCRIPT" token-verify)
 - `user_token`：用户登录 Token（valid=true 时使用）
 - `phone_masked`：脱敏手机号（valid=true 时使用）
 
-**Token 有效（valid=true）**：直接取 `user_token` 和 `phone_masked` 进入下一步。
+**Token 有效（valid=true）**：从输出 JSON 中取值并赋值给 shell 变量：
+
+```bash
+USER_TOKEN=$(echo "$VERIFY_RESULT" | $PYTHON -c "import sys,json; d=json.load(sys.stdin); print(d['user_token'])")
+PHONE_MASKED=$(echo "$VERIFY_RESULT" | $PYTHON -c "import sys,json; d=json.load(sys.stdin); print(d['phone_masked'])")
+```
 
 **Token 无效（valid=false）**：引导用户登录：
 ```
 您还未登录美团账号，需要先完成验证才能领取权益。
 请告诉我您的手机号，我来帮您发送验证码。
 ```
-按照 `meituan-c-user-auth` Skill 的 `send-sms` → `verify` 流程完成登录，然后重新执行 token-verify 获取有效 Token。
+按如下流程完成登录，然后重新执行 token-verify 获取有效 Token：
+
+**登录流程（发送验证码）：**
+```bash
+$PYTHON "$AUTH_SCRIPT" send-sms --phone <手机号>
+```
+- 成功 → 告知用户"验证码已发送至手机 xxx****xxxx，请打开手机短信查看验证码，60秒内有效"
+- `code=20010`（安全验证限流）→ 提示用户点击 `redirect_url` 完成安全验证，用户确认完成后**重新发送验证码**
+- 其他失败 → 按错误码说明告知用户
+
+**登录流程（验证验证码）：**
+```bash
+$PYTHON "$AUTH_SCRIPT" verify --phone <手机号> --code <6位验证码>
+```
+- 成功 → `user_token` 已写入本地，重新执行 token-verify 并提取变量：
+  ```bash
+  VERIFY_RESULT=$($PYTHON "$AUTH_SCRIPT" token-verify)
+  USER_TOKEN=$(echo "$VERIFY_RESULT" | $PYTHON -c "import sys,json; d=json.load(sys.stdin); print(d['user_token'])")
+  PHONE_MASKED=$(echo "$VERIFY_RESULT" | $PYTHON -c "import sys,json; d=json.load(sys.stdin); print(d['phone_masked'])")
+  ```
+- 失败 → 按错误码说明告知用户，可重新发送或重试
+
+**认证相关错误码：**
+
+| 错误码 | 友好提示 |
+|--------|---------|
+| 20002 | 验证码已发送，请等待1分钟后再试 |
+| 20003 | 验证码错误或已过期（60秒有效），请重新获取 |
+| 20004 | 该手机号未注册美团，请先下载美团APP完成注册 |
+| 20006 | 该手机号今日发送次数已达上限（最多5次），请明天再试 |
+| 20007 | 短信发送量已达今日上限，请明天再试 |
+| 20010 | 需完成安全验证，请访问验证链接，完成后留意手机短信 |
+| 99997 | 系统繁忙，请稍后重试 |
+| 99998 | 未知异常，请稍后重试 |
+| 99999 | 参数错误，请检查手机号格式是否正确 |
 
 ---
 
@@ -232,7 +258,7 @@ QUERY_RESULT=$($PYTHON "$QUERY_SCRIPT" --token "$USER_TOKEN" --dates "20260320,2
 
 | 场景 | 处理方式 |
 |------|---------|
-| Token 无效 | 引导用户通过 meituan-c-user-auth 重新登录 |
+| Token 无效 | 引导用户通过内置认证模块（auth.py）完成登录 |
 | 今天已领取 | 友好提示，明天再来 |
 | 活动已结束/额度耗尽 | 如实告知 |
 | 网络超时/异常 | 建议稍后重试 |
