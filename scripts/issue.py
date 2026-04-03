@@ -9,17 +9,8 @@ import hashlib
 import json
 import os
 import sys
-import warnings
 from datetime import datetime
 from pathlib import Path
-
-# 屏蔽 httpx/urllib3 的 SSL 不验证警告，避免污染 JSON stdout 输出
-warnings.filterwarnings("ignore", message=".*ssl.*", category=UserWarning)
-try:
-    import urllib3
-    urllib3.disable_warnings()
-except ImportError:
-    pass
 
 # ── 常量 ──────────────────────────────────────────────────────────────
 BASE_URL   = "https://peppermall.meituan.com"
@@ -70,9 +61,15 @@ def load_history() -> dict:
 
 def save_history(data: dict):
     """保存兑换码历史文件"""
+    import stat
     HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    # 仅当前用户可读写（0600），防止其他用户读取领券历史
+    try:
+        os.chmod(HISTORY_FILE, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass  # Windows 不支持 chmod，静默跳过
 
 
 def gen_redeem_code(user_token: str, phone_masked: str, date_str: str) -> str:
@@ -195,7 +192,7 @@ def main():
             json=body,
             headers={"Content-Type": "application/json"},
             timeout=15,
-            verify=False
+            verify=True
         )
         resp_data = resp.json()
     except httpx.TimeoutException:
@@ -226,7 +223,8 @@ def main():
 
     if code == 0:
         # 发券成功（code=0），保存兑换码到历史文件（首次领取时才写，复用历史 code 不重复写）
-        if not existing_codes:
+        is_first_issue = not bool(existing_codes)
+        if is_first_issue:
             save_redeem_code(sub_channel_code, args.token, today, redeem_code)
 
         success_list = data.get("successEquityList", [])
@@ -235,6 +233,10 @@ def main():
         print(json.dumps({
             "success": True,
             "code": 0,
+            "is_first_issue": is_first_issue,
+            # is_first_issue=true  → 本次首次领取成功，向用户展示"🎉 领取成功！"
+            # is_first_issue=false → 今日已领取过，不可重复领取，向用户展示：
+            #   "⚠️ 今天已经领取过了，不能重复领取。以下是上次领取的券信息：" + coupons
             "redeem_code": redeem_code,
             "request_id": data.get("requestId", ""),
             "issue_status": data.get("equityPkgIssueStatus"),

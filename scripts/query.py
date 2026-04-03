@@ -10,17 +10,8 @@ import argparse
 import json
 import os
 import sys
-import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
-
-# 屏蔽 httpx/urllib3 的 SSL 不验证警告，避免污染 JSON stdout 输出
-warnings.filterwarnings("ignore", message=".*ssl.*", category=UserWarning)
-try:
-    import urllib3
-    urllib3.disable_warnings()
-except ImportError:
-    pass
 
 # ── 常量 ──────────────────────────────────────────────────────────────
 BASE_URL    = "https://peppermall.meituan.com"
@@ -197,7 +188,7 @@ def main():
             json=body,
             headers={"Content-Type": "application/json"},
             timeout=15,
-            verify=False
+            verify=True
         )
         resp_data = resp.json()
     except httpx.TimeoutException:

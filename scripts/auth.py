@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-meituan-coupon-get-tool 内嵌认证模块
-基于 meituan-c-user-auth v1.0.0-SNAPSHOT 内嵌，用户无需单独安装 meituan-c-user-auth。
+meituan-coupon-get-tool 内嵌认证模块 v1.0.4
+基于 meituan-c-user-auth v1.0.4 内嵌，用户无需单独安装 meituan-c-user-auth。
 对接 EDS Claw 短信登录接口，管理 user_token 与 device_token。
 
 接口文档：https://km.sankuai.com/collabpage/2752893495（新版）
 
 用法示例：
+  python auth.py version-check
   python auth.py status
   python auth.py token-verify
   python auth.py send-sms --phone 13812345678
   python auth.py verify --phone 13812345678 --code 123456
   python auth.py logout
+  python auth.py clear-device-token
 """
 
 import argparse
@@ -20,22 +22,16 @@ import json
 import random
 import sys
 import time
-import warnings
 from pathlib import Path
-
-# 屏蔽 httpx/urllib3 的 SSL 不验证警告，避免污染 JSON stdout 输出
-warnings.filterwarnings("ignore", message=".*ssl.*", category=UserWarning)
-try:
-    import urllib3
-    urllib3.disable_warnings()
-except ImportError:
-    pass
 
 # ── 常量 ──────────────────────────────────────────────────────────────
 # 内嵌于 meituan-coupon-get-tool，Token 存储 key 与外部 meituan-c-user-auth 共享，
 # 实现"一次登录、两个 Skill 共用 Token"，用户安装任一 Skill 登录后均可复用。
 AUTH_KEY       = "meituan-c-user-auth"
-LOCAL_VERSION  = "1.0.0-SNAPSHOT"   # 内嵌版本号
+LOCAL_VERSION  = "1.0.12"   # 内嵌版本号，与 SKILL.md 中 version 字段保持一致
+
+# 用户协议接受状态字段名
+TERMS_ACCEPTED_KEY = "terms_accepted"
 
 # Skill 公开主页（clawhub.ai，外网可访问）
 SKILL_PAGE_URL = "https://clawhub.ai/meituan-zhengchang/meituan-coupon-get-tool"
@@ -75,7 +71,6 @@ SMS_CODE_GET_PATH    = "/eds/claw/login/sms/code/get"
 SMS_CODE_VERIFY_PATH = "/eds/claw/login/sms/code/verify"
 TOKEN_VERIFY_PATH    = "/eds/claw/login/token/verify"
 
-IS_TEST_ENV = False
 
 
 # ── 版本检测 ──────────────────────────────────────────────────────────
@@ -151,9 +146,15 @@ def load_auth() -> dict:
 
 
 def save_auth(data: dict):
+    import os, stat
     AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(AUTH_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    # 仅当前用户可读写（0600），防止其他用户读取 Token
+    try:
+        os.chmod(AUTH_FILE, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass  # Windows 不支持 chmod，静默跳过
 
 
 def get_token_data() -> dict:
@@ -175,43 +176,54 @@ def logout_token_data():
     auth = load_auth()
     entry = auth.get(AUTH_KEY, {})
     entry["user_token"] = ""          # 置空，表示已退出登录
-    entry["expires_at"] = 0           # 过期时间重置，下次 status 检查时触发重登提示
     auth[AUTH_KEY] = entry
     save_auth(auth)
+
+
+def get_terms_accepted() -> bool:
+    """
+    获取用户是否接受服务协议的状态。
+    返回 True 表示已接受，False 表示未接受或状态不存在。
+    """
+    token_data = get_token_data()
+    return token_data.get(TERMS_ACCEPTED_KEY, False)
+
+
+def set_terms_accepted(accepted: bool):
+    """
+    设置用户服务协议接受状态。
+    accepted: True 表示接受，False 表示不接受。
+    """
+    token_data = get_token_data()
+    token_data[TERMS_ACCEPTED_KEY] = accepted
+    save_token_data(token_data)
 
 
 # ── 命令：status（本地检查，不调用接口）────────────────────────────────
 
 def cmd_status():
-    """仅检查本地存储的 Token 是否过期，不调用远程接口"""
+    """仅检查本地存储的 Token 是否存在，不调用远程接口，不做本地过期校验"""
     token_data = get_token_data()
-    now = time.time()
     user_token = token_data.get("user_token")
     device_token = token_data.get("device_token")
-    expires_at = token_data.get("expires_at", 0)
     phone_masked = token_data.get("phone_masked", "")
 
-    if user_token and now < expires_at:
+    if user_token:
         print(json.dumps({
             "success": True,
             "valid": True,
             "user_token": user_token,
             "device_token": device_token,
             "phone_masked": phone_masked,
-            "expires_at": expires_at,
-            "expires_in_seconds": int(expires_at - now),
-            "is_test_env": IS_TEST_ENV,
             "check_mode": "local"
         }, ensure_ascii=False))
     else:
-        reason = "no_token" if not user_token else "expired"
         print(json.dumps({
             "success": True,
             "valid": False,
-            "reason": reason,
+            "reason": "no_token",
             "device_token": device_token,
             "phone_masked": phone_masked,
-            "is_test_env": IS_TEST_ENV,
             "check_mode": "local"
         }, ensure_ascii=False))
 
@@ -242,7 +254,6 @@ def cmd_token_verify():
             "reason": "no_token",
             "device_token": existing_device_token,
             "phone_masked": phone_masked,
-            "is_test_env": IS_TEST_ENV,
             "check_mode": "remote"
         }, ensure_ascii=False))
         return
@@ -254,23 +265,19 @@ def cmd_token_verify():
             params={"token": user_token},
             headers={"Content-Type": "application/json"},
             timeout=10,
-            verify=False
+            verify=True
         )
         resp_data = resp.json()
         code = resp_data.get("code")
 
         if code == 0:
             # Token 有效
-            expires_at = token_data.get("expires_at", 0)
             print(json.dumps({
                 "success": True,
                 "valid": True,
                 "user_token": user_token,
                 "device_token": existing_device_token,
                 "phone_masked": phone_masked,
-                "expires_at": expires_at,
-                "expires_in_seconds": max(0, int(expires_at - time.time())),
-                "is_test_env": IS_TEST_ENV,
                 "check_mode": "remote"
             }, ensure_ascii=False))
 
@@ -284,7 +291,6 @@ def cmd_token_verify():
                 "reason": "token_expired_or_invalid",
                 "device_token": existing_device_token,
                 "phone_masked": phone_masked,
-                "is_test_env": IS_TEST_ENV,
                 "check_mode": "remote",
                 "message": resp_data.get("message", "用户未登录或 Token 已过期，请重新登录")
             }, ensure_ascii=False))
@@ -296,7 +302,6 @@ def cmd_token_verify():
                 "error": "TOKEN_VERIFY_ERROR",
                 "code": code,
                 "message": resp_data.get("message", "Token 校验失败"),
-                "is_test_env": IS_TEST_ENV,
                 "check_mode": "remote"
             }, ensure_ascii=False))
             sys.exit(1)
@@ -305,8 +310,7 @@ def cmd_token_verify():
         print(json.dumps({
             "success": False,
             "error": "NETWORK_ERROR",
-            "message": str(e),
-            "is_test_env": IS_TEST_ENV
+            "message": str(e)
         }, ensure_ascii=False))
         sys.exit(1)
 
@@ -341,7 +345,7 @@ def cmd_send_sms(phone: str):
             json=body,
             headers={"Content-Type": "application/json"},
             timeout=10,
-            verify=False
+            verify=True
         )
         resp_data = resp.json()
         code = resp_data.get("code")
@@ -469,7 +473,7 @@ def cmd_verify(phone: str, code: str):
             json=body,
             headers={"Content-Type": "application/json"},
             timeout=10,
-            verify=False
+            verify=True
         )
         resp_data = resp.json()
         resp_code = resp_data.get("code")
@@ -486,9 +490,6 @@ def cmd_verify(phone: str, code: str):
                 }, ensure_ascii=False))
                 sys.exit(1)
 
-            # Token 有效期 7 天（604800 秒），本地记录过期时间
-            expires_in = 7 * 24 * 3600
-            expires_at = int(time.time()) + expires_in
             phone_masked = phone[:3] + "****" + phone[-4:]
 
             # device_token：直接使用上方已确定的 uuid_val（send-sms 时已持久化，此处只做复用）
@@ -500,9 +501,7 @@ def cmd_verify(phone: str, code: str):
                 "user_token": user_token,
                 "device_token": device_token,
                 "phone_masked": phone_masked,
-                "expires_at": expires_at,
-                "authed_at": int(time.time()),
-                "is_test_env": IS_TEST_ENV
+                "authed_at": int(time.time())
             }
             save_token_data(token_data)
 
@@ -511,8 +510,6 @@ def cmd_verify(phone: str, code: str):
                 "user_token": user_token,
                 "device_token": device_token,
                 "phone_masked": phone_masked,
-                "expires_at": expires_at,
-                "is_test_env": IS_TEST_ENV,
                 "message": "认证成功，user_token 已写入"
             }
             if is_new_device:
@@ -576,10 +573,150 @@ def cmd_logout():
     print(json.dumps(result, ensure_ascii=False))
 
 
+# ── 命令：terms-check / terms-accept / terms-decline ──────────────────
+
+def cmd_terms_check():
+    """检查用户是否已接受服务协议"""
+    accepted = get_terms_accepted()
+    print(json.dumps({
+        "success": True,
+        "terms_accepted": accepted,
+        "message": "用户已接受服务协议" if accepted else "用户尚未接受服务协议"
+    }, ensure_ascii=False))
+
+
+def cmd_terms_accept():
+    """用户接受服务协议"""
+    set_terms_accepted(True)
+    print(json.dumps({
+        "success": True,
+        "terms_accepted": True,
+        "message": "已接受服务协议，可以继续使用"
+    }, ensure_ascii=False))
+
+
+def cmd_terms_decline():
+    """用户拒绝服务协议"""
+    set_terms_accepted(False)
+    # 同时清除登录状态
+    logout_token_data()
+    print(json.dumps({
+        "success": True,
+        "terms_accepted": False,
+        "message": "已拒绝服务协议，无法继续使用相关功能"
+    }, ensure_ascii=False))
+
+
+# ── 命令：clear-device-token ──────────────────────────────────────────
+
+def cmd_clear_device_token():
+    """清除设备标识（device_token），同时清除 user_token 和 phone_masked。
+    仅在用户明确输入「清除设备标识」时调用，退出登录不触发此操作。
+    """
+    import os, stat
+    auth = load_auth()
+    entry = auth.get(AUTH_KEY, {})
+
+    had_device_token = bool(entry.get("device_token"))
+
+    # 清除所有认证相关字段
+    entry["user_token"] = ""
+    entry["device_token"] = ""
+    entry["phone_masked"] = ""
+    auth[AUTH_KEY] = entry
+
+    AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(AUTH_FILE, "w", encoding="utf-8") as f:
+        json.dump(auth, f, ensure_ascii=False, indent=2)
+    try:
+        os.chmod(AUTH_FILE, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
+
+    result = {
+        "success": True,
+        "message": "设备标识已清除，下次登录将生成新的 device_token",
+        "device_token_cleared": had_device_token
+    }
+    print(json.dumps(result, ensure_ascii=False))
+
+
+# ── 命令：定时任务管理 ─────────────────────────────────────────────────────────────
+
+# 定时任务状态字段名
+CRON_ENABLED_KEY = "cron_enabled"
+CRON_TIME_KEY = "cron_time"
+
+
+def cmd_cron_status():
+    """查询定时任务状态"""
+    token_data = get_token_data()
+    cron_enabled = token_data.get(CRON_ENABLED_KEY, False)
+    cron_time = token_data.get(CRON_TIME_KEY, "")
+
+    result = {
+        "success": True,
+        "cron_enabled": cron_enabled,
+        "cron_time": cron_time if cron_enabled else None,
+        "message": f"当前已设置每天 {cron_time} 自动领券" if cron_enabled else "暂未设置自动领券"
+    }
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def cmd_cron_set(time_str: str):
+    """设置定时任务
+
+    Args:
+        time_str: 时间字符串，格式 HH:MM（如 "10:00"）
+    """
+    import re
+
+    # 验证时间格式
+    if not re.match(r"^([0-1]?\d|2[0-3]):([0-5]\d)$", time_str):
+        print(json.dumps({
+            "success": False,
+            "error": "INVALID_TIME_FORMAT",
+            "message": "时间格式错误，请使用 HH:MM 格式（如 10:00、14:30）"
+        }, ensure_ascii=False))
+        sys.exit(1)
+
+    # 标准化时间格式（补零）
+    parts = time_str.split(":")
+    normalized_time = f"{int(parts[0]):02d}:{int(parts[1]):02d}"
+
+    token_data = get_token_data()
+    token_data[CRON_ENABLED_KEY] = True
+    token_data[CRON_TIME_KEY] = normalized_time
+    save_token_data(token_data)
+
+    print(json.dumps({
+        "success": True,
+        "cron_enabled": True,
+        "cron_time": normalized_time,
+        "message": f"✅ 已设置每天 {normalized_time} 自动领券"
+    }, ensure_ascii=False))
+
+
+def cmd_cron_disable():
+    """取消定时任务"""
+    token_data = get_token_data()
+    had_cron = token_data.get(CRON_ENABLED_KEY, False)
+
+    token_data[CRON_ENABLED_KEY] = False
+    # 保留 cron_time 字段作为历史记录，方便用户重新开启
+    save_token_data(token_data)
+
+    print(json.dumps({
+        "success": True,
+        "cron_enabled": False,
+        "message": "已关闭自动领券，需要时随时找我领券就行"
+    }, ensure_ascii=False))
+
+
 # ── 入口 ──────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="美团C端用户Agent认证工具")
+    parser = argparse.ArgumentParser(description="美团C端用户Agent认证工具（内嵌于 meituan-coupon-get-tool）")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # version-check
@@ -587,7 +724,7 @@ def main():
     p_vc.add_argument("--remote", default="", help="从 Friday 广场获取到的远程版本号（可选）")
 
     # status - 本地检查
-    subparsers.add_parser("status", help="本地检查 Token 是否存在及过期")
+    subparsers.add_parser("status", help="本地检查 Token 是否存在")
 
     # token-verify - 远程校验
     subparsers.add_parser("token-verify", help="调用远程接口校验 Token 有效性")
@@ -602,7 +739,29 @@ def main():
     p_verify.add_argument("--code", required=True, help="6位短信验证码")
 
     # logout
-    subparsers.add_parser("logout", help="退出登录，清除 user_token")
+    subparsers.add_parser("logout", help="退出登录，清除 user_token（保留 device_token）")
+
+    # terms-check - 检查协议状态
+    subparsers.add_parser("terms-check", help="检查用户是否已接受服务协议")
+
+    # terms-accept - 接受协议
+    subparsers.add_parser("terms-accept", help="接受服务协议")
+
+    # terms-decline - 拒绝协议
+    subparsers.add_parser("terms-decline", help="拒绝服务协议")
+
+    # clear-device-token
+    subparsers.add_parser("clear-device-token", help="清除设备标识（device_token），仅在用户明确要求时调用")
+
+    # cron-status - 查询定时任务状态
+    subparsers.add_parser("cron-status", help="查询定时自动领券状态")
+
+    # cron-set - 设置定时任务
+    p_cron_set = subparsers.add_parser("cron-set", help="设置每天定时自动领券时间")
+    p_cron_set.add_argument("--time", required=True, help="时间，格式 HH:MM（如 10:00、21:30）")
+
+    # cron-disable - 取消定时任务
+    subparsers.add_parser("cron-disable", help="取消定时自动领券")
 
     args = parser.parse_args()
 
@@ -618,6 +777,20 @@ def main():
         cmd_verify(args.phone, args.code)
     elif args.command == "logout":
         cmd_logout()
+    elif args.command == "terms-check":
+        cmd_terms_check()
+    elif args.command == "terms-accept":
+        cmd_terms_accept()
+    elif args.command == "terms-decline":
+        cmd_terms_decline()
+    elif args.command == "clear-device-token":
+        cmd_clear_device_token()
+    elif args.command == "cron-status":
+        cmd_cron_status()
+    elif args.command == "cron-set":
+        cmd_cron_set(args.time)
+    elif args.command == "cron-disable":
+        cmd_cron_disable()
 
 
 if __name__ == "__main__":
